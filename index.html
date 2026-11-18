@@ -7,6 +7,7 @@
 <title>Stash</title>
 <link rel="manifest" href="manifest.json">
 <link rel="icon" href="icon.svg">
+<link rel="apple-touch-icon" href="icon-192.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@200;300;400;500&display=swap" rel="stylesheet">
 <style>
@@ -175,11 +176,35 @@ const store = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)) } cat
 let items = load('stash', []), folderList = load('stash-folders', []);
 const save = () => store('stash', items), saveF = () => store('stash-folders', folderList);
 
-// ponytail: écriture directe, hors-ligne = pas de file d'attente; ajouter une queue si besoin
-const db = fn => user && fn(sb).then(({ error }) => error && console.error(error));
-const push = it => db(s => s.from('items').upsert(it));
-const remove = id => db(s => s.from('items').delete().eq('id', id));
-const upF = name => db(s => s.from('folders').upsert({ name }, { onConflict: 'user_id,name', ignoreDuplicates: true }));
+/* ---------- synchro : file d'attente persistante, rejouée dès que le réseau revient ---------- */
+let queue = load('stash-queue', []), uid = load('stash-uid', null), flushing = false, retryTimer;
+const saveQ = () => store('stash-queue', queue);
+function enqueue(op) { if (!uid) return; queue.push({ qid: crypto.randomUUID(), ...op }); saveQ(); flush() }
+const run = (s, o) => {
+  const t = s.from(o.t);
+  if (o.k === 'up') return t.upsert(o.d, o.o);
+  if (o.k === 'del') return t.delete().eq(...o.eq);
+  return t.update(o.d).eq(...o.eq);
+};
+const isNetErr = e => !navigator.onLine || /fetch|network|load failed|timeout/i.test(e?.message || '');
+async function flush() {
+  if (!user || flushing) return; flushing = true; clearTimeout(retryTimer);
+  try {
+    for (const o of [...queue]) {
+      if (o.nb > Date.now()) continue; // suppression encore annulable
+      const { error } = await run(sb, o);
+      if (error && isNetErr(error)) break; // hors-ligne : on réessaiera
+      if (error) console.error(error); // erreur définitive : on abandonne l'opération
+      queue = queue.filter(x => x.qid !== o.qid); saveQ();
+    }
+  } finally { flushing = false }
+  const next = queue.reduce((m, o) => Math.min(m, o.nb > Date.now() ? o.nb : Date.now() + 15000), Infinity);
+  if (next < Infinity) retryTimer = setTimeout(flush, next - Date.now() + 50);
+}
+addEventListener('online', flush);
+const push = it => enqueue({ k: 'up', t: 'items', d: { ...it } });
+const upF = name => enqueue({ k: 'up', t: 'folders', d: { name }, o: { onConflict: 'user_id,name', ignoreDuplicates: true } });
+const queuedDeletes = () => new Set(queue.filter(o => o.k === 'del' && o.t === 'items').map(o => o.eq[1]));
 
 const folders = () => [...new Set([...folderList, ...items.map(i => i.folder)].filter(Boolean))].sort();
 function createFolder(name) { if (!name || folders().includes(name)) return; folderList.push(name); saveF(); upF(name) }
@@ -187,14 +212,14 @@ function renameFolder(old, name) {
   if (!name || name === old) return;
   folderList = [...new Set([...folderList.filter(f => f !== old), name])]; saveF();
   items.forEach(i => i.folder === old && (i.folder = name)); save();
-  db(s => s.from('folders').delete().eq('name', old)); upF(name);
-  db(s => s.from('items').update({ folder: name }).eq('folder', old));
+  enqueue({ k: 'del', t: 'folders', eq: ['name', old] }); upF(name);
+  enqueue({ k: 'upd', t: 'items', d: { folder: name }, eq: ['folder', old] });
 }
 function deleteFolder(old) {
   folderList = folderList.filter(f => f !== old); saveF();
   items.forEach(i => i.folder === old && (i.folder = '')); save();
-  db(s => s.from('folders').delete().eq('name', old));
-  db(s => s.from('items').update({ folder: '' }).eq('folder', old));
+  enqueue({ k: 'del', t: 'folders', eq: ['name', old] });
+  enqueue({ k: 'upd', t: 'items', d: { folder: '' }, eq: ['folder', old] });
 }
 
 async function login(email) {
@@ -202,54 +227,102 @@ async function login(email) {
   toast(error ? error.message : 'Lien envoyé, ouvre ton email sur cet appareil');
 }
 async function pull() {
-  const { data, error } = await sb.from('items').select('id,url,title,type,folder,tags,fav,thumb,created,seen,opened').order('created', { ascending: false });
+  await flush();
+  if (queue.some(o => !(o.nb > Date.now()))) return; // encore hors-ligne : on garde le local
+  const { data, error } = await sb.from('items').select('*').order('created', { ascending: false });
   if (error) return console.error(error);
-  const remote = new Set(data.map(i => i.id)), local = items.filter(i => !remote.has(i.id) && !pendingDelete.has(i.id));
-  if (local.length) await sb.from('items').upsert(local); // premier login : envoie le local
-  items = [...local, ...data.filter(i => !pendingDelete.has(i.id))].sort((a, b) => b.created - a.created); save();
+  const gone = queuedDeletes(), remote = new Set(data.map(i => i.id));
+  let local = [], first = load('stash-synced', null) !== user.id;
+  if (first) { // premier login sur cet appareil : envoie le local
+    local = items.filter(i => !remote.has(i.id));
+    if (local.length) await sb.from('items').upsert(local);
+    store('stash-synced', user.id);
+  }
+  items = [...local, ...data.filter(i => !gone.has(i.id))].map(({ user_id, ...i }) => i).sort((a, b) => b.created - a.created); save();
   const { data: f } = await sb.from('folders').select('name');
   if (f) {
-    const names = f.map(x => x.name), missing = folderList.filter(n => !names.includes(n));
-    if (missing.length) await sb.from('folders').upsert(missing.map(name => ({ name })), { onConflict: 'user_id,name', ignoreDuplicates: true });
-    folderList = [...new Set([...names, ...missing])]; saveF();
+    const names = f.map(x => x.name);
+    if (first) folderList.filter(n => !names.includes(n)).forEach(upF);
+    folderList = [...new Set([...names, ...(first ? folderList : [])])]; saveF();
   }
-  render();
+  render(); backfill();
+}
+
+/* ---------- enrichissement : titre, image, durée ---------- */
+const AUTO_TAGS = { // tag ajouté automatiquement selon le site
+  code: /github\.com|gitlab\.com|stackoverflow\.com|dev\.to|npmjs\.com|developer\.mozilla\.org/,
+  trading: /tradingview\.com|investing\.com|forexfactory\.com|babypips\.com|binance\.com|coinmarketcap\.com|zonebourse\.com|boursorama\.com/,
+  social: /twitter\.com|x\.com|instagram\.com|tiktok\.com|reddit\.com|threads\.net|linkedin\.com/,
+  musique: /spotify\.com|soundcloud\.com|deezer\.com|music\.apple\.com|bandcamp\.com/,
+  design: /figma\.com|dribbble\.com|behance\.net|pinterest\.|awwwards\.com|mobbin\.com/,
+  article: /medium\.com|substack\.com|lemonde\.fr|wikipedia\.org/,
+  shopping: /amazon\.|aliexpress\.|ebay\.|leboncoin\.fr|vinted\./,
+  recette: /marmiton\.org|750g\.com|cuisineaz\.com|journaldesfemmes\.fr\/recette/,
+};
+const autoTags = url => Object.keys(AUTO_TAGS).filter(t => AUTO_TAGS[t].test(host(url)));
+
+async function enrich(it, keepTitle) {
+  let r = {};
+  if (user) {
+    const res = await sb.functions.invoke('meta', { body: { url: it.url } });
+    if (res.error) return; // réseau ou fonction indisponible : on réessaiera plus tard
+    r = res.data || {};
+  }
+  if (!r.title && it.type === 'video') { // repli sans compte : noembed
+    try { const n = await (await fetch('https://noembed.com/embed?url=' + encodeURIComponent(it.url))).json(); r = { title: n.title, image: n.thumbnail_url } } catch {}
+  }
+  if (!keepTitle && r.title) it.title = r.title;
+  if (!it.thumb && r.image) it.thumb = r.image;
+  it.mins = r.mins || 0; // 0 = inconnu, déjà essayé
+  save(); render(); push(it);
+}
+let backfilling = false;
+async function backfill() { // complète les anciens éléments sans durée, 10 par ouverture
+  if (backfilling || !user) return; backfilling = true;
+  for (const it of items.filter(i => i.mins == null).slice(0, 10)) await enrich(it, true).catch(() => {});
+  backfilling = false;
 }
 
 async function addItem({ url, title, folder, tags }) {
   const type = VIDEO_HOSTS.test(url) ? 'video' : 'link', yt = ytId(url);
-  const it = { id: crypto.randomUUID(), url, title: title || host(url), type, folder: folder || '', tags, fav: false,
-    created: Date.now(), seen: false, opened: 0, thumb: yt ? `https://img.youtube.com/vi/${yt}/hqdefault.jpg` : '' };
+  const it = { id: crypto.randomUUID(), url, title: title || host(url), type, folder: folder || '',
+    tags: [...new Set([...tags, ...autoTags(url)])], fav: false, created: Date.now(), seen: false, opened: 0, mins: null,
+    thumb: yt ? `https://img.youtube.com/vi/${yt}/hqdefault.jpg` : '' };
   items.unshift(it); save(); render(); push(it); vib();
   toast('Ajouté', it.folder ? null : 'Ranger', () => openMove([it.id]));
-  try { // titre + image d'aperçu
-    if (type === 'video') {
-      const r = await (await fetch('https://noembed.com/embed?url=' + encodeURIComponent(url))).json();
-      if (!title && r.title) it.title = r.title;
-      if (!it.thumb && r.thumbnail_url) it.thumb = r.thumbnail_url;
-    } else { // ponytail: microlink gratuit = ~50 aperçus/jour, une Edge Function si ça ne suffit plus
-      const { data: r } = await (await fetch('https://api.microlink.io/?url=' + encodeURIComponent(url))).json();
-      if (!title && r?.title) it.title = r.title;
-      if (r?.image?.url) it.thumb = r.image.url;
-    }
-    save(); render(); push(it);
-  } catch {}
+  enrich(it, !!title).catch(() => {});
 }
 
-let pendingDelete = new Set();
 function del(ids) {
-  const gone = items.filter(i => ids.includes(i.id));
-  ids.forEach(id => pendingDelete.add(id));
+  const gone = items.filter(i => ids.includes(i.id)), nb = Date.now() + 5200;
+  ids.forEach(id => enqueue({ k: 'del', t: 'items', eq: ['id', id], nb })); // part même si l'app est fermée
   items = items.filter(i => !ids.includes(i.id)); save(); exitSelect(); vib();
-  let undone = false;
   toast(gone.length > 1 ? `${gone.length} éléments supprimés` : 'Supprimé', 'Annuler', () => {
-    undone = true; ids.forEach(id => pendingDelete.delete(id));
+    queue = queue.filter(o => !(o.k === 'del' && o.t === 'items' && ids.includes(o.eq[1]))); saveQ();
     items = [...items, ...gone].sort((a, b) => b.created - a.created); save(); render();
   });
-  setTimeout(() => { if (!undone) ids.forEach(id => { pendingDelete.delete(id); remove(id) }) }, 5200);
 }
 function toggleFav(id) { const i = items.find(x => x.id === id); i.fav = !i.fav; save(); render(); push(i); vib() }
 function markSeen(id) { const i = items.find(x => x.id === id); i.seen = true; i.opened = Date.now(); save(); push(i); setTimeout(render, 300) }
+
+/* ---------- sauvegarde fichier ---------- */
+function exportData() {
+  const blob = new Blob([JSON.stringify({ app: 'stash', version: 1, exported: new Date().toISOString(), folders: folders(), items }, null, 2)], { type: 'application/json' });
+  const a = document.createElement('a'); a.href = URL.createObjectURL(blob);
+  a.download = `stash-${new Date().toISOString().slice(0, 10)}.json`; a.click(); URL.revokeObjectURL(a.href);
+  toast(`${items.length} éléments exportés`);
+}
+async function importData(file) {
+  try {
+    const d = JSON.parse(await file.text());
+    if (!Array.isArray(d.items)) throw 0;
+    const have = new Set(items.map(i => i.id)), urls = new Set(items.map(i => i.url));
+    const add = d.items.filter(i => i.id && i.url && !have.has(i.id) && !urls.has(i.url));
+    items = [...items, ...add].sort((a, b) => b.created - a.created); save();
+    add.forEach(push); (d.folders || []).forEach(createFolder);
+    render(); toast(`${add.length} éléments importés`);
+  } catch { toast('Fichier invalide') }
+}
 
 /* ---------- toast ---------- */
 let toastTimer;
@@ -262,7 +335,7 @@ function toast(msg, action, fn) {
 
 /* ---------- état d'affichage ---------- */
 let page = 'home', lastPage = '', lib = {}, q = '', selecting = false, selected = new Set(), suppress = false;
-const resetLib = () => lib = { kind: 'all', fav: false, unseen: false, tag: null, folder: null };
+const resetLib = () => lib = { kind: 'all', fav: false, unseen: false, short: false, tag: null, folder: null };
 resetLib();
 
 function tap(e, id) {
@@ -275,7 +348,8 @@ function toggleSel(id) { selected.has(id) ? selected.delete(id) : selected.add(i
 function exitSelect() { selecting = false; selected.clear(); render() }
 
 /* ---------- composants ---------- */
-const sub = i => `${esc(host(i.url))}${i.folder ? ' · ' + esc(i.folder) : ''}`;
+const dur = i => i.mins > 0 ? (i.type === 'video' ? (i.mins >= 60 ? `${Math.floor(i.mins / 60)} h ${String(i.mins % 60).padStart(2, '0')}` : `${i.mins} min`) : `${i.mins} min de lecture`) : '';
+const sub = i => [esc(host(i.url)), dur(i), esc(i.folder)].filter(Boolean).join(' · ');
 const tagHtml = i => i.tags?.length ? `<div class="tags">${i.tags.map(t => `<b>${esc(t)}</b>`).join('')}</div>` : '';
 const img = (src, cls, url) => `<img src="${esc(src)}" class="${cls}" alt="" loading="lazy" draggable="false" onload="this.parentNode.classList.remove('sk')" onerror="this.parentNode.classList.remove('sk');this.src='${favicon(url)}';this.className='fi'">`;
 function card(i, compact) {
@@ -331,12 +405,15 @@ function home() {
   ${syncCard()}`;
 }
 function syncCard() {
-  return user
-    ? `<p class="sub" style="text-align:center;margin-top:16px">Synchro : ${esc(user.email)} · <a href="#" style="text-decoration:underline" onclick="sb.auth.signOut().then(()=>location.reload())">déconnexion</a></p>`
+  return `<div class="h">Sauvegarde</div><div class="card" style="display:flex;gap:10px;align-items:center">
+      <div style="flex:1"><div class="label">Exporter / importer</div><div class="sub">Un fichier avec tous tes liens, au cas où</div></div>
+      <button class="chip" onclick="exportData()">Exporter</button>
+      <label class="chip">Importer<input type="file" accept="application/json,.json" hidden onchange="this.files[0]&&importData(this.files[0])"></label></div>` + (user
+    ? `<p class="sub" style="text-align:center;margin-top:16px">Synchro : ${esc(user.email)} · <a href="#" style="text-decoration:underline" onclick="logout()">déconnexion</a></p>`
     : `<form class="card" style="margin-top:24px" onsubmit="event.preventDefault();login(this.email.value)">
         <div class="label">Synchroniser</div><div class="sub" style="margin-bottom:12px">Reçois un lien de connexion par email</div>
         <input class="search" name="email" type="email" placeholder="ton@email.com" required style="margin-bottom:8px">
-        <button class="primary">Envoyer le lien</button></form>`;
+        <button class="primary">Envoyer le lien</button></form>`);
 }
 
 function filtered() {
@@ -344,6 +421,7 @@ function filtered() {
   if (lib.kind !== 'all') l = l.filter(i => i.type === lib.kind);
   if (lib.fav) l = l.filter(i => i.fav);
   if (lib.unseen) l = l.filter(i => !i.seen);
+  if (lib.short) l = l.filter(i => i.mins > 0 && i.mins < 10);
   if (lib.tag) l = l.filter(i => i.tags?.includes(lib.tag));
   if (lib.folder != null) l = l.filter(i => i.folder === lib.folder);
   return l;
@@ -356,7 +434,7 @@ function library() {
   <div class="chips">
     ${lib.folder != null ? chip('📁 ' + (lib.folder || 'Sans dossier') + '  ✕', true, set('folder', null)) : ''}
     ${chip('Tout', lib.kind === 'all', set('kind', 'all'))}${chip('Vidéos', lib.kind === 'video', set('kind', 'video'))}${chip('Liens', lib.kind === 'link', set('kind', 'link'))}
-    ${chip('★ Favoris', lib.fav, set('fav', !lib.fav))}${chip('● Non vus', lib.unseen, set('unseen', !lib.unseen))}
+    ${chip('★ Favoris', lib.fav, set('fav', !lib.fav))}${chip('● Non vus', lib.unseen, set('unseen', !lib.unseen))}${chip('⏱ Moins de 10 min', lib.short, set('short', !lib.short))}
     ${tags.map(t => chip('#' + t, lib.tag === t, set('tag', lib.tag === t ? null : t))).join('')}
   </div>
   ${l.map(i => card(i)).join('') || (items.length ? '<p class="empty">Rien avec ces filtres</p>' : emptyState('Ta bibliothèque est vide', 'Tout ce que tu enregistres arrive ici.'))}`;
@@ -491,7 +569,12 @@ document.querySelectorAll('nav button').forEach(b => b.onclick = () => go(b.data
 const p = new URLSearchParams(location.search), shared = p.get('url') || findUrl(p.get('text'));
 render();
 if (shared) { history.replaceState(null, '', location.pathname); openAdd({ url: shared, title: p.get('title') || '' }) }
-sb.auth.onAuthStateChange((_, session) => { const was = user; user = session?.user || null; if (user && !was) pull(); else render() });
+sb.auth.onAuthStateChange((_, session) => {
+  const was = user; user = session?.user || null;
+  if (user && uid !== user.id) { uid = user.id; store('stash-uid', uid) }
+  if (user && !was) pull(); else render();
+});
+async function logout() { queue = []; saveQ(); uid = null; store('stash-uid', null); store('stash-synced', null); await sb.auth.signOut(); location.reload() }
 addEventListener('visibilitychange', () => document.visibilityState === 'visible' && user && pull());
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js');
 </script>
