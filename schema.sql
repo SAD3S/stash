@@ -25,3 +25,5 @@ create table folders (
 alter table folders enable row level security;
 create policy "own folders" on folders for all
   using (user_id = auth.uid()) with check (user_id = auth.uid());
+
+alter table items add column seen boolean default false, add column opened bigint default 0;
