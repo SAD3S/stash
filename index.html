@@ -93,6 +93,7 @@ dialog{margin:auto auto 0;width:100%;max-width:720px;border:1px solid var(--line
 dialog[open]{animation:up .22s ease}@keyframes up{from{transform:translateY(40px);opacity:0}}
 dialog::backdrop{background:rgba(0,0,0,.6)}
 dialog h2{font-weight:500;margin-bottom:16px}
+dialog textarea{width:100%;background:var(--card2);border:1px solid var(--line);border-radius:16px;padding:14px;margin-bottom:10px;outline:none;font:inherit;color:inherit;resize:vertical;min-height:70px}
 dialog input{width:100%;background:var(--card2);border:1px solid var(--line);border-radius:16px;padding:14px;margin-bottom:10px;outline:none}
 .close{float:right;width:36px;height:36px;border-radius:50%;border:1px solid var(--line);background:var(--card2);cursor:pointer;margin-top:-4px}
 details summary{color:var(--dim);font-size:14px;cursor:pointer;margin:4px 0 12px;list-style:none}details summary::before{content:"+ "}
@@ -100,6 +101,11 @@ details[open] summary::before{content:"− "}
 .hint{font-size:12px;color:var(--dim);margin:-4px 0 10px 4px}
 .primary{width:100%;padding:15px;border-radius:999px;border:0;background:var(--txt);color:#000;font-weight:500;cursor:pointer;margin-top:6px}
 .del{width:100%;padding:12px;background:none;border:0;color:#ff5a5a;cursor:pointer;margin-top:6px}
+.note{font-size:13px;color:#bbb;margin-top:6px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;font-style:italic}
+#player{padding:16px 16px calc(env(safe-area-inset-bottom) + 20px)}
+.frame{aspect-ratio:16/9;border-radius:18px;overflow:hidden;background:#000;margin:8px 0 14px}.frame iframe{width:100%;height:100%;border:0}
+.row-btns{display:flex;gap:8px}.row-btns .primary{margin:0}.row-btns .ghost{flex:1;padding:14px;border-radius:999px;border:1px solid var(--line);background:var(--card2);cursor:pointer}
+.banner{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:18px}
 #mlist{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:14px}
 </style>
 </head>
@@ -127,6 +133,7 @@ details[open] summary::before{content:"− "}
       <input name="folder" list="folderList" placeholder="Dossier">
       <datalist id="folderList"></datalist>
       <input name="tags" placeholder="Tags, séparés par des virgules">
+      <textarea name="note" placeholder="Note perso : pourquoi tu le gardes…"></textarea>
     </details>
     <button class="primary">Enregistrer</button>
     <button type="button" class="del" id="delBtn" hidden>Supprimer</button>
@@ -138,8 +145,16 @@ details[open] summary::before{content:"− "}
     <button type="button" class="close" aria-label="Fermer" onclick="this.closest('dialog').close()">✕</button><h2 id="fTitle">Nouveau dossier</h2>
     <input name="name" placeholder="Nom du dossier" required>
     <button class="primary">Enregistrer</button>
+    <button type="button" class="ghost" id="fShare" hidden style="width:100%;margin-top:8px;padding:14px;border-radius:999px;border:1px solid var(--line);background:var(--card2);cursor:pointer">Partager ce dossier</button>
     <button type="button" class="del" id="fDel" hidden>Supprimer le dossier</button>
   </form>
+</dialog>
+
+<dialog id="player">
+  <button type="button" class="close" aria-label="Fermer" onclick="this.closest('dialog').close()">✕</button>
+  <h2 id="pTitle" style="font-size:17px;padding-right:44px"></h2>
+  <div class="frame" id="pFrame"></div>
+  <div class="row-btns"><button class="ghost" id="pOpen">Ouvrir l'original</button><button class="primary" style="flex:1" id="pSeen">Marquer vu</button></div>
 </dialog>
 
 <dialog id="msheet">
@@ -169,6 +184,10 @@ const findUrl = t => (t || '').match(/https?:\/\/\S+/)?.[0];
 const vib = () => navigator.vibrate?.(12);
 const VIDEO_HOSTS = /(youtube\.com|youtu\.be|vimeo\.com|tiktok\.com|dailymotion\.com|twitch\.tv|instagram\.com\/(reel|p)\/)/i;
 const DAY = 864e5;
+const VAPID = 'BL9DD6TsW6b5iW-cC-BjkdViVHCG2AaYWoPl5SSOHJsuGWDQdyYuo1t4KL3PCaeoRCqnlRCcli9yOMlY7JNq6Mg';
+const vimeoId = u => (u.match(/vimeo\.com\/(?:video\/)?(\d+)/) || [])[1];
+const embedUrl = u => ytId(u) ? `https://www.youtube-nocookie.com/embed/${ytId(u)}?autoplay=1&enablejsapi=1&playsinline=1&rel=0&origin=${location.origin}`
+  : vimeoId(u) ? `https://player.vimeo.com/video/${vimeoId(u)}?autoplay=1` : null;
 
 /* ---------- données ---------- */
 const load = (k, d) => { try { return JSON.parse(localStorage.getItem(k)) || d } catch { return d } };
@@ -214,12 +233,14 @@ function renameFolder(old, name) {
   items.forEach(i => i.folder === old && (i.folder = name)); save();
   enqueue({ k: 'del', t: 'folders', eq: ['name', old] }); upF(name);
   enqueue({ k: 'upd', t: 'items', d: { folder: name }, eq: ['folder', old] });
+  enqueue({ k: 'upd', t: 'shares', d: { folder: name }, eq: ['folder', old] });
 }
 function deleteFolder(old) {
   folderList = folderList.filter(f => f !== old); saveF();
   items.forEach(i => i.folder === old && (i.folder = '')); save();
   enqueue({ k: 'del', t: 'folders', eq: ['name', old] });
   enqueue({ k: 'upd', t: 'items', d: { folder: '' }, eq: ['folder', old] });
+  enqueue({ k: 'del', t: 'shares', eq: ['folder', old] });
 }
 
 async function login(email) {
@@ -283,10 +304,10 @@ async function backfill() { // complète les anciens éléments sans durée, 10 
   backfilling = false;
 }
 
-async function addItem({ url, title, folder, tags }) {
+async function addItem({ url, title, folder, tags, note = '' }) {
   const type = VIDEO_HOSTS.test(url) ? 'video' : 'link', yt = ytId(url);
   const it = { id: crypto.randomUUID(), url, title: title || host(url), type, folder: folder || '',
-    tags: [...new Set([...tags, ...autoTags(url)])], fav: false, created: Date.now(), seen: false, opened: 0, mins: null,
+    tags: [...new Set([...tags, ...autoTags(url)])], fav: false, created: Date.now(), seen: false, opened: 0, mins: null, note,
     thumb: yt ? `https://img.youtube.com/vi/${yt}/hqdefault.jpg` : '' };
   items.unshift(it); save(); render(); push(it); vib();
   toast('Ajouté', it.folder ? null : 'Ranger', () => openMove([it.id]));
@@ -303,6 +324,7 @@ function del(ids) {
   });
 }
 function toggleFav(id) { const i = items.find(x => x.id === id); i.fav = !i.fav; save(); render(); push(i); vib() }
+function markOpened(id) { const i = items.find(x => x.id === id); i.opened = Date.now(); save(); push(i) }
 function markSeen(id) { const i = items.find(x => x.id === id); i.seen = true; i.opened = Date.now(); save(); push(i); setTimeout(render, 300) }
 
 /* ---------- sauvegarde fichier ---------- */
@@ -312,16 +334,118 @@ function exportData() {
   a.download = `stash-${new Date().toISOString().slice(0, 10)}.json`; a.click(); URL.revokeObjectURL(a.href);
   toast(`${items.length} éléments exportés`);
 }
+function parseCsv(text) { // CSV simple avec guillemets
+  const rows = [[]]; let f = '', q = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (q) { if (c === '"' && text[i + 1] === '"') { f += '"'; i++ } else if (c === '"') q = false; else f += c }
+    else if (c === '"') q = true;
+    else if (c === ',') { rows.at(-1).push(f); f = '' }
+    else if (c === '\n') { rows.at(-1).push(f.replace(/\r$/, '')); rows.push([]); f = '' }
+    else f += c;
+  }
+  rows.at(-1).push(f);
+  const [head, ...data] = rows.filter(r => r.some(Boolean));
+  return data.map(r => Object.fromEntries(head.map((h, k) => [h.trim().toLowerCase(), r[k] ?? ''])));
+}
+const fromPocket = ({ url, title, time, tags, seen }) => ({
+  id: crypto.randomUUID(), url, title: title && title !== url ? title : host(url), type: VIDEO_HOSTS.test(url) ? 'video' : 'link',
+  folder: '', tags: [...new Set([...tags, ...autoTags(url)])], fav: false, created: (+time || Date.now() / 1000) * 1000,
+  seen, opened: 0, mins: null, note: '', thumb: ytId(url) ? `https://img.youtube.com/vi/${ytId(url)}/hqdefault.jpg` : '',
+});
 async function importData(file) {
   try {
-    const d = JSON.parse(await file.text());
-    if (!Array.isArray(d.items)) throw 0;
+    const text = await file.text(); let add, folderNames = [];
+    if (/^\s*[{[]/.test(text)) { // sauvegarde Stash
+      const d = JSON.parse(text); if (!Array.isArray(d.items)) throw 0;
+      add = d.items; folderNames = d.folders || [];
+    } else if (/<a\s/i.test(text)) { // ancien export Pocket (HTML)
+      const doc = new DOMParser().parseFromString(text, 'text/html'); let archived = false; add = [];
+      doc.body.querySelectorAll('h1, a').forEach(el => {
+        if (el.tagName === 'H1') { archived = /archive/i.test(el.textContent); return }
+        add.push(fromPocket({ url: el.href, title: el.textContent.trim(), time: el.getAttribute('time_added'),
+          tags: (el.getAttribute('tags') || '').split(',').map(t => t.trim().toLowerCase()).filter(Boolean), seen: archived }));
+      });
+    } else { // export Pocket CSV : title,url,time_added,tags,status
+      add = parseCsv(text).filter(r => r.url).map(r => fromPocket({ url: r.url, title: r.title, time: r.time_added,
+        tags: (r.tags || '').split('|').map(t => t.trim().toLowerCase()).filter(Boolean), seen: r.status === 'archive' }));
+    }
     const have = new Set(items.map(i => i.id)), urls = new Set(items.map(i => i.url));
-    const add = d.items.filter(i => i.id && i.url && !have.has(i.id) && !urls.has(i.url));
+    add = add.filter(i => i.id && /^https?:/.test(i.url || '') && !have.has(i.id) && !urls.has(i.url) && urls.add(i.url));
     items = [...items, ...add].sort((a, b) => b.created - a.created); save();
-    add.forEach(push); (d.folders || []).forEach(createFolder);
-    render(); toast(`${add.length} éléments importés`);
-  } catch { toast('Fichier invalide') }
+    add.forEach(push); folderNames.forEach(createFolder);
+    render(); toast(`${add.length} éléments importés`); backfill();
+  } catch { toast('Fichier non reconnu') }
+}
+
+/* ---------- lecteur vidéo intégré ---------- */
+let playing = null;
+function openPlayer(id) {
+  playing = items.find(i => i.id === id); markOpened(id);
+  $('#pTitle').textContent = playing.title;
+  $('#pFrame').innerHTML = `<iframe src="${esc(embedUrl(playing.url))}" allow="autoplay; encrypted-media; picture-in-picture; fullscreen" allowfullscreen></iframe>`;
+  const f = $('#pFrame iframe');
+  f.onload = () => { // demande au lecteur de nous prévenir de la fin
+    f.contentWindow.postMessage(JSON.stringify({ event: 'listening', id: 1, channel: 'widget' }), '*');
+    f.contentWindow.postMessage(JSON.stringify({ method: 'addEventListener', value: 'ended' }), '*');
+  };
+  $('#pSeen').textContent = playing.seen ? 'Déjà vu ✓' : 'Marquer vu';
+  $('#player').showModal();
+}
+addEventListener('message', e => {
+  if (!playing || !/youtube|vimeo/.test(e.origin)) return;
+  let d; try { d = typeof e.data === 'string' ? JSON.parse(e.data) : e.data } catch { return }
+  const ended = d?.event === 'ended' || (d?.event === 'onStateChange' && d.info === 0) || d?.info?.playerState === 0;
+  if (ended && !playing.seen) { markSeen(playing.id); $('#pSeen').textContent = 'Vu ✓'; toast('Marqué comme vu') }
+});
+$('#player').addEventListener('close', () => { $('#pFrame').innerHTML = ''; playing = null; render() });
+$('#pOpen').onclick = () => { open(playing.url, '_blank', 'noopener'); $('#player').close() };
+$('#pSeen').onclick = () => { markSeen(playing.id); $('#player').close() };
+
+/* ---------- rappel hebdo (notifications) ---------- */
+const b64u = s => Uint8Array.from(atob((s + '==='.slice((s.length + 3) % 4)).replace(/-/g, '+').replace(/_/g, '/')), c => c.charCodeAt(0));
+let pushOn = load('stash-push', false);
+async function enablePush() {
+  try {
+    if (await Notification.requestPermission() !== 'granted') return toast('Notifications refusées dans les réglages');
+    const reg = await navigator.serviceWorker.ready;
+    const sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: b64u(VAPID) });
+    const { error } = await sb.from('push_subs').upsert({ endpoint: sub.endpoint, sub: sub.toJSON() });
+    if (error) throw error;
+    pushOn = true; store('stash-push', true); render(); toast('Rappel activé : chaque samedi matin');
+  } catch (e) { console.error(e); toast('Impossible d’activer les notifications ici') }
+}
+async function disablePush() {
+  const sub = await (await navigator.serviceWorker.ready).pushManager.getSubscription();
+  if (sub) { await sb.from('push_subs').delete().eq('endpoint', sub.endpoint); await sub.unsubscribe() }
+  pushOn = false; store('stash-push', false); render(); toast('Rappel désactivé');
+}
+async function testPush() { const { data, error } = await sb.functions.invoke('weekly'); toast(error ? 'Échec du test' : data?.sent ? 'Notification envoyée' : 'Aucun appareil abonné') }
+
+/* ---------- partage de dossier ---------- */
+async function shareFolder(name) {
+  if (!user) return toast('Connecte-toi pour partager un dossier');
+  let { data } = await sb.from('shares').select('token').eq('folder', name).maybeSingle();
+  if (!data) ({ data } = await sb.from('shares').insert({ folder: name }).select('token').single());
+  if (!data) return toast('Partage impossible, réessaie');
+  const url = `${location.origin}${location.pathname}?share=${data.token}`;
+  $('#fsheet').close();
+  try { await navigator.share({ title: `Stash · ${name}`, url }) }
+  catch (e) { if (e?.name === 'AbortError') return; await navigator.clipboard?.writeText(url).catch(() => {}); }
+  toast('Lien de partage prêt', 'Arrêter', async () => { await sb.from('shares').delete().eq('folder', name); toast('Partage arrêté') });
+}
+let shared = null;
+async function loadShared(token) {
+  const { data, error } = await sb.rpc('shared_folder', { t: token });
+  shared = error || !data?.length ? { missing: true } : { name: data[0].folder, items: data.filter(r => r.url) };
+  render();
+}
+function sharedPage() {
+  if (!shared) return '<p class="empty">Chargement…</p>';
+  if (shared.missing) return emptyState('Lien de partage invalide', 'Ce dossier n’est plus partagé.', false);
+  return `<div class="banner"><div><div class="sub">Dossier partagé</div><h1>${esc(shared.name)}</h1></div>
+    <a class="chip" href="${location.pathname}">Ouvrir Stash</a></div>
+  ${shared.items.map(i => card(i, false, true)).join('') || '<p class="empty">Ce dossier est vide</p>'}`;
 }
 
 /* ---------- toast ---------- */
@@ -341,6 +465,8 @@ resetLib();
 function tap(e, id) {
   if (suppress) { e.preventDefault(); return false }
   if (selecting) { e.preventDefault(); toggleSel(id); return false }
+  const it = items.find(i => i.id === id);
+  if (it.type === 'video' && embedUrl(it.url)) { e.preventDefault(); openPlayer(id); return false }
   markSeen(id); return true;
 }
 function startSelect(id) { selecting = true; selected = new Set([id]); render() }
@@ -352,14 +478,16 @@ const dur = i => i.mins > 0 ? (i.type === 'video' ? (i.mins >= 60 ? `${Math.floo
 const sub = i => [esc(host(i.url)), dur(i), esc(i.folder)].filter(Boolean).join(' · ');
 const tagHtml = i => i.tags?.length ? `<div class="tags">${i.tags.map(t => `<b>${esc(t)}</b>`).join('')}</div>` : '';
 const img = (src, cls, url) => `<img src="${esc(src)}" class="${cls}" alt="" loading="lazy" draggable="false" onload="this.parentNode.classList.remove('sk')" onerror="this.parentNode.classList.remove('sk');this.src='${favicon(url)}';this.className='fi'">`;
-function card(i, compact) {
+function card(i, compact, ro) {
   const media = !compact && (i.type === 'video' || i.thumb);
   const visual = media
     ? `<div class="thumb ${i.thumb ? 'sk' : ''}">${i.thumb ? img(i.thumb, '', i.url) : `<img class="fi" src="${favicon(i.url)}" alt="" draggable="false">`}</div>`
     : `<div class="fav ${i.thumb ? 'sk' : ''}">${i.thumb ? img(i.thumb, 'cover', i.url) : `<img src="${favicon(i.url)}" alt="" loading="lazy" draggable="false">`}</div>`;
+  if (ro) return `<a class="card ${media ? 'media' : 'row'}" href="${esc(i.url)}" target="_blank" rel="noopener">${visual}
+    <div class="meta-row"><div class="meta"><div class="label">${esc(i.title)}</div><div class="sub">${[esc(host(i.url)), dur(i)].filter(Boolean).join(' · ')}</div>${i.note ? `<div class="note">${esc(i.note)}</div>` : ''}</div></div></a>`;
   return `<a class="card sw ${media ? 'media' : 'row'} ${selected.has(i.id) ? 'sel' : ''}" data-id="${i.id}" href="${esc(i.url)}" target="_blank" rel="noopener" draggable="false"
       onclick="return tap(event,'${i.id}')" oncontextmenu="event.preventDefault()">${visual}
-    <div class="meta-row"><div class="meta"><div class="label">${i.seen ? '' : '<span class="new"></span>'}${esc(i.title)}</div><div class="sub">${sub(i)}</div>${compact ? '' : tagHtml(i)}</div>
+    <div class="meta-row"><div class="meta"><div class="label">${i.seen ? '' : '<span class="new"></span>'}${esc(i.title)}</div><div class="sub">${sub(i)}</div>${compact ? '' : (i.note ? `<div class="note">${esc(i.note)}</div>` : '') + tagHtml(i)}</div>
       <button class="star ${i.fav ? 'on' : ''}" aria-label="Favori" onclick="event.preventDefault();event.stopPropagation();toggleFav('${i.id}')">${i.fav ? '★' : '☆'}</button>
       <button class="star" aria-label="Modifier" onclick="event.preventDefault();event.stopPropagation();openSheet('${i.id}')">⋯</button></div></a>`;
 }
@@ -406,10 +534,13 @@ function home() {
 }
 function syncCard() {
   return `<div class="h">Sauvegarde</div><div class="card" style="display:flex;gap:10px;align-items:center">
-      <div style="flex:1"><div class="label">Exporter / importer</div><div class="sub">Un fichier avec tous tes liens, au cas où</div></div>
+      <div style="flex:1"><div class="label">Exporter / importer</div><div class="sub">Sauvegarde Stash, ou ton export Pocket (CSV/HTML)</div></div>
       <button class="chip" onclick="exportData()">Exporter</button>
-      <label class="chip">Importer<input type="file" accept="application/json,.json" hidden onchange="this.files[0]&&importData(this.files[0])"></label></div>` + (user
-    ? `<p class="sub" style="text-align:center;margin-top:16px">Synchro : ${esc(user.email)} · <a href="#" style="text-decoration:underline" onclick="logout()">déconnexion</a></p>`
+      <label class="chip">Importer<input type="file" accept=".json,.csv,.html,application/json,text/csv,text/html" hidden onchange="this.files[0]&&importData(this.files[0])"></label></div>` + (user
+    ? (('PushManager' in window) ? `<div class="h">Rappel hebdo</div><div class="card" style="display:flex;gap:10px;align-items:center">
+        <div style="flex:1"><div class="label">Notification du samedi</div><div class="sub">${pushOn ? 'Activé sur cet appareil' : 'Le nombre de vidéos non vues, chaque samedi matin'}</div></div>
+        ${pushOn ? '<button class="chip" onclick="testPush()">Tester</button><button class="chip" onclick="disablePush()">Couper</button>' : '<button class="chip on" onclick="enablePush()">Activer</button>'}</div>` : '')
+      + `<p class="sub" style="text-align:center;margin-top:16px">Synchro : ${esc(user.email)} · <a href="#" style="text-decoration:underline" onclick="logout()">déconnexion</a></p>`
     : `<form class="card" style="margin-top:24px" onsubmit="event.preventDefault();login(this.email.value)">
         <div class="label">Synchroniser</div><div class="sub" style="margin-bottom:12px">Reçois un lien de connexion par email</div>
         <input class="search" name="email" type="email" placeholder="ton@email.com" required style="margin-bottom:8px">
@@ -441,9 +572,9 @@ function library() {
 }
 function search() {
   const s = q.toLowerCase().replace(/^#/, ''), tags = [...new Set(items.flatMap(i => i.tags || []))].sort();
-  const res = s ? items.filter(i => (i.title + ' ' + i.url + ' ' + (i.tags || []).join(' ') + ' ' + i.folder).toLowerCase().includes(s)) : [];
+  const res = s ? items.filter(i => (i.title + ' ' + i.url + ' ' + (i.tags || []).join(' ') + ' ' + i.folder + ' ' + (i.note || '')).toLowerCase().includes(s)) : [];
   return `<div class="top"><h1>Recherche</h1></div>
-  <input class="search" id="q" placeholder="Titre, site, tag, dossier…" value="${esc(q)}" oninput="q=this.value;render();focusQ()" autocomplete="off">
+  <input class="search" id="q" placeholder="Titre, site, tag, dossier, note…" value="${esc(q)}" oninput="q=this.value;render();focusQ()" autocomplete="off">
   ${s ? (res.map(i => card(i)).join('') || '<p class="empty">Aucun résultat</p>')
       : tags.length ? `<div class="h">Tags</div><div class="chips" style="flex-wrap:wrap">${tags.map(t => chip('#' + t, false, `q=${js(t)};render();focusQ()`)).join('')}</div>` : ''}`;
 }
@@ -462,10 +593,10 @@ function foldersPage() {
 
 function render() {
   const app = $('#app');
-  app.innerHTML = { home, library, folders: foldersPage, search }[page]();
+  app.innerHTML = { home, library, folders: foldersPage, search, shared: sharedPage }[page]();
   if (page !== lastPage) { app.classList.remove('enter'); void app.offsetWidth; app.classList.add('enter'); lastPage = page }
   document.querySelectorAll('nav button').forEach(b => b.classList.toggle('on', b.dataset.page === page));
-  $('nav').hidden = selecting; $('.fab').hidden = selecting; $('#selbar').hidden = !selecting;
+  $('nav').hidden = selecting || page === 'shared'; $('.fab').hidden = selecting || page === 'shared'; $('#selbar').hidden = !selecting;
   if (selecting) $('#selbar').innerHTML = `<span>${selected.size} sélectionné${selected.size > 1 ? 's' : ''}</span>
     <span><button onclick="openMove([...selected])">Ranger</button><button class="danger" onclick="del([...selected])">Supprimer</button><button onclick="exitSelect()" aria-label="Annuler">✕</button></span>`;
   $('#folderList').innerHTML = folders().map(f => `<option value="${esc(f)}">`).join('');
@@ -511,7 +642,7 @@ function openSheet(id, pre = {}) {
   editing = items.find(i => i.id === id) || null;
   const f = $('#form'), v = editing || pre;
   f.url.value = v.url || ''; f.title.value = editing ? v.title : (v.title || '');
-  f.folder.value = v.folder ?? (lib.folder || ''); f.tags.value = (v.tags || []).join(', ');
+  f.folder.value = v.folder ?? (lib.folder || ''); f.tags.value = (v.tags || []).join(', '); f.note.value = v.note || '';
   $('#sheetTitle').textContent = editing ? 'Modifier' : 'Ajouter';
   $('#moreOpts').open = !!editing; $('#delBtn').hidden = !editing; $('#clipHint').hidden = true;
   $('#sheet').showModal();
@@ -527,7 +658,7 @@ async function openAdd(pre) {
 }
 $('#form').onsubmit = () => {
   const f = $('#form'), data = { url: f.url.value.trim(), title: f.title.value.trim(), folder: f.folder.value.trim(),
-    tags: f.tags.value.split(',').map(t => t.trim().toLowerCase()).filter(Boolean) };
+    tags: f.tags.value.split(',').map(t => t.trim().toLowerCase()).filter(Boolean), note: f.note.value.trim() };
   createFolder(data.folder);
   if (editing) { Object.assign(editing, data, { title: data.title || host(data.url) }); save(); render(); push(editing) }
   else if (items.some(i => i.url === data.url)) toast('Déjà enregistré');
@@ -539,9 +670,10 @@ let editingFolder = null;
 function openFolderSheet(name = null) {
   editingFolder = name; $('#fform').name.value = name || '';
   $('#fTitle').textContent = name ? 'Modifier le dossier' : 'Nouveau dossier';
-  $('#fDel').hidden = !name; $('#fsheet').showModal();
+  $('#fDel').hidden = !name; $('#fShare').hidden = !name; $('#fsheet').showModal();
 }
 $('#fform').onsubmit = () => { const n = $('#fform').name.value.trim(); editingFolder ? renameFolder(editingFolder, n) : createFolder(n); render() };
+$('#fShare').onclick = () => shareFolder(editingFolder);
 $('#fDel').onclick = () => {
   if (!confirm(`Supprimer « ${editingFolder} » ? Ses éléments iront dans « Sans dossier ».`)) return;
   deleteFolder(editingFolder); $('#fsheet').close(); render();
@@ -566,9 +698,12 @@ document.querySelectorAll('dialog').forEach(d => d.onclick = e => { if (e.target
 document.querySelectorAll('nav button').forEach(b => b.onclick = () => go(b.dataset.page));
 
 /* ---------- démarrage ---------- */
-const p = new URLSearchParams(location.search), shared = p.get('url') || findUrl(p.get('text'));
+const p = new URLSearchParams(location.search), sharedUrl = p.get('url') || findUrl(p.get('text'));
+const shareToken = p.get('share');
+if (shareToken) { page = 'shared'; loadShared(shareToken) }
+else if (p.get('view') === 'unseen') { history.replaceState(null, '', location.pathname); page = 'library'; Object.assign(lib, { kind: 'video', unseen: true }) }
 render();
-if (shared) { history.replaceState(null, '', location.pathname); openAdd({ url: shared, title: p.get('title') || '' }) }
+if (sharedUrl) { history.replaceState(null, '', location.pathname); openAdd({ url: sharedUrl, title: p.get('title') || '' }) }
 sb.auth.onAuthStateChange((_, session) => {
   const was = user; user = session?.user || null;
   if (user && uid !== user.id) { uid = user.id; store('stash-uid', uid) }

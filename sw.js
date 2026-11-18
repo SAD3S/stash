@@ -7,3 +7,13 @@ self.addEventListener('fetch', e => {
       .catch(() => caches.match(e.request, { ignoreSearch: true }))
   );
 });
+
+// Rappel hebdo (Web Push)
+self.addEventListener('push', e => {
+  const d = e.data?.json() || {};
+  e.waitUntil(self.registration.showNotification(d.title || 'Stash', { body: d.body, icon: 'icon-192.png', badge: 'icon-192.png', data: d.url || './' }));
+});
+self.addEventListener('notificationclick', e => {
+  e.notification.close();
+  e.waitUntil(clients.openWindow(new URL(e.notification.data, self.registration.scope).href));
+});
