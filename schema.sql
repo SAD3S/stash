@@ -16,3 +16,12 @@ create table items (
 alter table items enable row level security;
 create policy "own items" on items for all
   using (user_id = auth.uid()) with check (user_id = auth.uid());
+
+create table folders (
+  user_id uuid not null default auth.uid() references auth.users on delete cascade,
+  name text not null,
+  primary key (user_id, name)
+);
+alter table folders enable row level security;
+create policy "own folders" on folders for all
+  using (user_id = auth.uid()) with check (user_id = auth.uid());

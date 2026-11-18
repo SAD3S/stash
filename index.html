@@ -17,18 +17,21 @@ button,input,select{font:inherit;color:inherit}
 h1{font-size:34px;font-weight:500;letter-spacing:-.5px}
 .top{display:flex;align-items:center;justify-content:space-between;margin-bottom:20px}
 .icon-btn{width:44px;height:44px;border-radius:50%;background:var(--card2);border:1px solid var(--line);display:grid;place-items:center;cursor:pointer}
-.card{background:linear-gradient(160deg,#1a1a1a,#0e0e0e);border:1px solid var(--line);border-radius:var(--r);padding:18px}
+html{background:#000}
+body{background:radial-gradient(70% 45% at 85% -10%,rgba(255,255,255,.13),transparent 70%),radial-gradient(55% 40% at -15% 45%,rgba(255,255,255,.06),transparent 70%),radial-gradient(60% 40% at 110% 100%,rgba(255,255,255,.05),transparent 70%);background-attachment:fixed}
+body::before{content:"";position:fixed;inset:0;z-index:-1;pointer-events:none;background-image:radial-gradient(rgba(255,255,255,.09) 1px,transparent 1.2px);background-size:22px 22px;-webkit-mask-image:linear-gradient(to bottom,#000,transparent 75%);mask-image:linear-gradient(to bottom,#000,transparent 75%)}
+.card{background:linear-gradient(160deg,rgba(32,32,32,.72),rgba(12,12,12,.72));backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);border:1px solid var(--line);border-radius:var(--r);padding:18px}
 .grid2{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px}
 .big{font-size:44px;font-weight:300;letter-spacing:-1px}.big small{font-size:15px;color:var(--dim);margin-left:4px}
 .label{font-size:15px}.sub{font-size:13px;color:var(--dim);margin-top:2px}
 .ring{width:42px;height:42px;border-radius:50%;border:2px solid #555;border-right-color:var(--txt);display:grid;place-items:center;margin-bottom:28px}
 .wide{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px}
 /* activity dots */
-.months{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:12px}
-.months span{display:block;text-align:center;font-size:13px;margin-bottom:10px}
-.dots{display:grid;grid-template-columns:repeat(7,1fr);gap:5px;justify-items:center}
-.dots i{width:4px;height:4px;border-radius:50%;background:#3a3a3a}
-.dots i.on{background:#fff;box-shadow:0 0 6px #fff}
+.heat-m,.heat{display:grid;grid-template-columns:repeat(17,1fr)}
+.heat-m{font-size:12px;color:var(--dim);margin-bottom:10px}.heat-m span{white-space:nowrap}
+.heat{grid-template-rows:repeat(7,1fr);grid-auto-flow:column;row-gap:8px;margin-bottom:16px;justify-items:center}
+.heat i{width:5px;height:5px;border-radius:50%;background:#333}
+.heat i.on{background:#fff;box-shadow:0 0 6px #fff}.heat i.fut{background:none}
 /* list */
 .search{width:100%;background:var(--card2);border:1px solid var(--line);border-radius:999px;padding:12px 18px;margin-bottom:12px;outline:none}
 .chips{display:flex;gap:8px;overflow-x:auto;margin-bottom:14px;scrollbar-width:none}
@@ -81,6 +84,15 @@ dialog input,dialog select{width:100%;background:var(--card2);border:1px solid v
   </form>
 </dialog>
 
+<dialog id="fsheet">
+  <form method="dialog" id="fform">
+    <h2 id="fTitle">Nouveau dossier</h2>
+    <input name="name" placeholder="Nom du dossier" required>
+    <button class="primary">Enregistrer</button>
+    <button type="button" class="del" id="fDel" hidden>Supprimer le dossier</button>
+  </form>
+</dialog>
+
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js"></script>
 <script>
 // À remplir : Supabase > Project Settings > API (la clé "anon" est publique, c'est normal)
@@ -91,6 +103,28 @@ let user = null;
 // ponytail: écriture directe, hors-ligne = pas de file d'attente; ajouter une queue si besoin
 const push = it => sb && user && sb.from('items').upsert(it).then(({ error }) => error && console.error(error));
 const remove = id => sb && user && sb.from('items').delete().eq('id', id).then(({ error }) => error && console.error(error));
+const db = fn => sb && user && fn(sb).then(({ error }) => error && console.error(error));
+let folderList = [];
+try { folderList = JSON.parse(localStorage.getItem('stash-folders') || '[]') } catch {}
+const saveF = () => { try { localStorage.setItem('stash-folders', JSON.stringify(folderList)) } catch {} };
+const upF = name => db(s => s.from('folders').upsert({ name }, { onConflict: 'user_id,name', ignoreDuplicates: true }));
+function createFolder(name) {
+  if (!name || folders().includes(name)) return;
+  folderList.push(name); saveF(); upF(name);
+}
+function renameFolder(old, name) {
+  if (!name || name === old) return;
+  folderList = [...new Set([...folderList.filter(f => f !== old), name])]; saveF();
+  items.forEach(i => i.folder === old && (i.folder = name)); save();
+  db(s => s.from('folders').delete().eq('name', old)); upF(name);
+  db(s => s.from('items').update({ folder: name }).eq('folder', old));
+}
+function deleteFolder(old) {
+  folderList = folderList.filter(f => f !== old); saveF();
+  items.forEach(i => i.folder === old && (i.folder = '')); save();
+  db(s => s.from('folders').delete().eq('name', old));
+  db(s => s.from('items').update({ folder: '' }).eq('folder', old));
+}
 async function login(email) {
   const { error } = await sb.auth.signInWithOtp({ email, options: { emailRedirectTo: location.origin + location.pathname } });
   alert(error ? error.message : 'Lien envoyé, ouvre ton email sur cet appareil.');
@@ -101,7 +135,14 @@ async function pull() {
   // premier login : envoie ce qui existe en local
   const remote = new Set(data.map(i => i.id)), local = items.filter(i => !remote.has(i.id));
   if (local.length) await sb.from('items').upsert(local);
-  items = [...local, ...data].sort((a, b) => b.created - a.created); save(); render();
+  items = [...local, ...data].sort((a, b) => b.created - a.created); save();
+  const { data: f } = await sb.from('folders').select('name');
+  if (f) {
+    const names = f.map(x => x.name), missing = folderList.filter(n => !names.includes(n));
+    if (missing.length) await sb.from('folders').upsert(missing.map(name => ({ name })), { onConflict: 'user_id,name', ignoreDuplicates: true });
+    folderList = [...new Set([...names, ...missing])]; saveF();
+  }
+  render();
 }
 const VIDEO_HOSTS = /(youtube\.com|youtu\.be|vimeo\.com|tiktok\.com|dailymotion\.com|twitch\.tv|instagram\.com\/(reel|p)\/)/i;
 const $ = s => document.querySelector(s);
@@ -133,19 +174,22 @@ async function addItem({ url, title, folder, tags }) {
   }
 }
 
-const folders = () => [...new Set(items.map(i => i.folder).filter(Boolean))].sort();
+const folders = () => [...new Set([...folderList, ...items.map(i => i.folder)].filter(Boolean))].sort();
 const allTags = list => [...new Set(list.flatMap(i => i.tags))].sort();
 
 function activity() {
   const days = new Set(items.map(i => new Date(i.created).toDateString()));
-  const now = new Date();
-  return [2, 1, 0].map(back => {
-    const m = new Date(now.getFullYear(), now.getMonth() - back, 1);
-    const n = new Date(m.getFullYear(), m.getMonth() + 1, 0).getDate();
-    const dots = Array.from({ length: n }, (_, d) =>
-      `<i class="${days.has(new Date(m.getFullYear(), m.getMonth(), d + 1).toDateString()) ? 'on' : ''}"></i>`).join('');
-    return `<div><span>${m.toLocaleString('fr', { month: 'short' })}</span><div class="dots">${dots}</div></div>`;
-  }).join('');
+  // 17 semaines (colonnes) × 7 jours (lignes, lundi en haut)
+  const W = 17, today = new Date(); today.setHours(0, 0, 0, 0);
+  const start = new Date(today); start.setDate(today.getDate() - ((today.getDay() + 6) % 7) - (W - 1) * 7);
+  let dots = '', months = '';
+  for (let d = 0; d < W * 7; d++) {
+    const day = new Date(start); day.setDate(start.getDate() + d);
+    dots += `<i class="${day > today ? 'fut' : days.has(day.toDateString()) ? 'on' : ''}"></i>`;
+    if (day.getDate() === 1 && d / 7 < W - 2)
+      months += `<span style="grid-column:${Math.floor(d / 7) + 1}/span 3">${day.toLocaleString('fr', { month: 'short' })}</span>`;
+  }
+  return `<div class="heat-m">${months}</div><div class="heat">${dots}</div>`;
 }
 
 const plusBtn = `<button class="icon-btn" onclick="openSheet()" aria-label="Ajouter"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></button>`;
@@ -158,7 +202,7 @@ function home() {
     <div class="card" onclick="go('links')"><div class="big">${links}</div><div class="label">Liens</div><div class="sub">sites enregistrés</div></div>
     <div class="card" onclick="go('videos')"><div class="big">${vids}</div><div class="label">Vidéos</div><div class="sub">à regarder</div></div>
   </div>
-  <div class="card" style="margin-bottom:12px"><div class="months">${activity()}</div>
+  <div class="card" style="margin-bottom:12px">${activity()}
     <div class="label">Activité</div><div class="sub">jours où tu as enregistré</div></div>
   <div class="card wide" onclick="go('folders')"><div><div class="label">Dossiers</div><div class="sub">${items.filter(i => i.fav).length} favoris</div></div><div class="big">${folders().length}</div></div>
   <div class="card wide"><div><div class="label">Ajoutés</div><div class="sub">7 derniers jours</div></div><div class="big">${week}</div></div>
@@ -178,7 +222,8 @@ function list(type) {
   if (filter.folder != null) list = list.filter(i => i.folder === filter.folder);
   if (q) list = list.filter(i => (i.title + i.url + i.tags.join(' ')).toLowerCase().includes(q));
   const chip = (label, on, act) => `<button class="chip ${on ? 'on' : ''}" onclick="${act}">${esc(label)}</button>`;
-  const star = i => `<button class="star ${i.fav ? 'on' : ''}" onclick="event.preventDefault();toggleFav('${i.id}')">${i.fav ? '★' : '☆'}</button>`;
+  const star = i => `<button class="star ${i.fav ? 'on' : ''}" onclick="event.preventDefault();toggleFav('${i.id}')">${i.fav ? '★' : '☆'}</button>`
+    + `<button class="star" aria-label="Modifier" onclick="event.preventDefault();openSheet('${i.id}')">⋯</button>`;
   const tagHtml = i => i.tags.length ? `<div class="tags">${i.tags.map(t => `<b>${esc(t)}</b>`).join('')}</div>` : '';
   const sub = i => `${esc(host(i.url))}${i.folder ? ' · ' + esc(i.folder) : ''}`;
   const rows = list.map(i => type === 'link'
@@ -194,16 +239,16 @@ function list(type) {
   <div class="chips">${chip('★ Favoris', filter.fav, 'filter.fav=!filter.fav;render()')}
     ${filter.folder != null ? chip('📁 ' + (filter.folder || 'Sans dossier') + ' ✕', true, 'filter.folder=null;render()') : ''}
     ${tags.map(t => chip('#' + t, filter.tag === t, `filter.tag=filter.tag===${esc(JSON.stringify(t))}?null:${esc(JSON.stringify(t))};render()`)).join('')}</div>
-  ${rows || '<p class="empty">Rien ici pour l’instant</p>'}
-  <p class="sub" style="text-align:center;margin-top:10px">Appui long sur un élément pour le modifier</p>`;
+  ${rows || '<p class="empty">Rien ici pour l’instant</p>'}`;
 }
 
 function foldersPage() {
   const f = [...folders(), ...(items.some(i => !i.folder) ? [''] : [])];
-  return `<div class="top"><h1>Dossiers</h1>${plusBtn}</div>
+  return `<div class="top"><h1>Dossiers</h1>${plusBtn.replace('openSheet()', 'openFolderSheet()')}</div>
   <div class="grid2">${f.map(name => {
     const n = items.filter(i => i.folder === name);
-    return `<div class="card" onclick='openFolder(${esc(JSON.stringify(name))})'>
+    return `<div class="card" style="position:relative" onclick='openFolder(${esc(JSON.stringify(name))})'>
+      ${name ? `<button class="star" style="position:absolute;top:10px;right:10px" aria-label="Modifier" onclick='event.stopPropagation();openFolderSheet(${esc(JSON.stringify(name))})'>⋯</button>` : ''}
       <div class="ring">${n.length}</div><div class="label">${esc(name || 'Sans dossier')}</div>
       <div class="sub">${n.filter(i => i.type === 'link').length} liens · ${n.filter(i => i.type === 'video').length} vidéos</div></div>`;
   }).join('')}</div>${f.length ? '' : '<p class="empty">Aucun dossier</p>'}`;
@@ -232,10 +277,25 @@ function openSheet(id, pre = {}) {
 $('#form').onsubmit = () => {
   const f = $('#form'), data = { url: f.url.value.trim(), title: f.title.value.trim(), folder: f.folder.value.trim(),
     tags: f.tags.value.split(',').map(t => t.trim().toLowerCase()).filter(Boolean) };
+  createFolder(data.folder);
   if (editing) { Object.assign(editing, data, { title: data.title || host(data.url) }); save(); render(); push(editing) }
   else addItem(data);
 };
 $('#delBtn').onclick = () => { if (confirm('Supprimer ?')) { remove(editing.id); items = items.filter(i => i !== editing); save(); $('#sheet').close(); render() } };
+let editingFolder = null;
+function openFolderSheet(name = null) {
+  editingFolder = name; $('#fform').name.value = name || '';
+  $('#fTitle').textContent = name ? 'Modifier le dossier' : 'Nouveau dossier';
+  $('#fDel').hidden = !name; $('#fsheet').showModal();
+}
+$('#fform').onsubmit = () => {
+  const n = $('#fform').name.value.trim();
+  editingFolder ? renameFolder(editingFolder, n) : createFolder(n); render();
+};
+$('#fDel').onclick = () => {
+  if (!confirm(`Supprimer « ${editingFolder} » ? Ses liens iront dans « Sans dossier ».`)) return;
+  deleteFolder(editingFolder); $('#fsheet').close(); render();
+};
 document.querySelectorAll('nav button').forEach(b => b.onclick = () => go(b.dataset.page));
 
 // Partage Android : l'URL arrive souvent dans "text"
